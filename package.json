@@ -43,14 +43,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "scripts": {
-    "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
-    "prepare": "pnpm build",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.client.json",
-    "bundle": "tsdown",
-    "watch": "tsdown --watch",
-    "test": "vitest run"
-  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -107,5 +99,11 @@
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   },
-  "packageManager": "pnpm@11.21.0"
+  "scripts": {
+    "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.client.json",
+    "bundle": "tsdown",
+    "watch": "tsdown --watch",
+    "test": "vitest run"
+  }
 }

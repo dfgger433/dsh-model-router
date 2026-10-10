@@ -22,6 +22,8 @@ export interface RouterCatalog {
   byId: Map<string, MergedModel>
   /** Provider id → whether the provider currently has usable credentials. */
   credentialConfigured: Map<string, boolean>
+  /** False while discovery is empty, a provider is pending, or listModels failed. */
+  complete: boolean
 }
 
 const EMPTY_CATALOG: RouterCatalog = {
@@ -30,6 +32,7 @@ const EMPTY_CATALOG: RouterCatalog = {
   models: [],
   byId: new Map(),
   credentialConfigured: new Map(),
+  complete: false,
 }
 
 interface ConfigurableEntry {
@@ -114,6 +117,9 @@ export async function buildCatalog(ctx: Context, ignorePrefix = false): Promise<
   const providers: ProviderInfo[] = []
   const providerNames = new Map<string, string>()
   const credentialConfigured = new Map<string, boolean>()
+  const registered = new Set(routes.map(route => route.id))
+  let complete = routes.length > 0
+    && [...directory.keys()].every(id => id === ROUTER_PROVIDER_ID || registered.has(id))
 
   for (const route of routes) {
     const entry = directory.get(route.id)
@@ -126,8 +132,12 @@ export async function buildCatalog(ctx: Context, ignorePrefix = false): Promise<
         seen.add(model.id)
         models.push({ id: model.id, name: model.name })
       }
+      // Treat successful-but-empty discovery as pending too: providers may
+      // register before their model lists are ready during startup.
+      if (models.length === 0) complete = false
     } catch {
-      // provider whose catalog is unavailable contributes no models
+      complete = false
+      // Keep the live catalog honest; persisted preferences survive separately.
     }
     providers.push({ id: route.id, name: route.name, models })
     credentialConfigured.set(route.id, await detectCredentialConfigured(ctx, entry))
@@ -135,5 +145,5 @@ export async function buildCatalog(ctx: Context, ignorePrefix = false): Promise<
 
   const models = mergeModels(providers, { ignorePrefix })
   const byId = new Map(models.map(model => [model.id, model]))
-  return { providers, providerNames, models, byId, credentialConfigured }
+  return { providers, providerNames, models, byId, credentialConfigured, complete }
 }

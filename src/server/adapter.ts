@@ -98,6 +98,10 @@ export function bindRoute(facts: RouterFacts, modelId: string): BoundRoute {
   const merged = mergedFor(facts, modelId)
   const route = merged === null ? null : routeFor(facts, modelId)
   if (merged === null || route === null) throw unroutable(modelId)
+  const stored = facts.config().models[merged.id]
+  if (stored?.enabled === false) {
+    throw new LlmError(`model-router: model "${modelId}" is disabled`, 'NO_ADAPTER')
+  }
   return { route, merged }
 }
 
@@ -116,6 +120,7 @@ export class ModelRouterAdapter extends LlmAdapter {
     const names = this.facts.providerNames()
     const out: LlmModelInfo[] = []
     for (const merged of sortModelsForList(models, config)) {
+      if (config.models[merged.id]?.enabled === false) continue
       const route = routeFor(this.facts, merged.id)
       const display = displayProvider(merged, route?.provider)
       if (display === null) continue

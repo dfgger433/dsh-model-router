@@ -11,6 +11,7 @@ export interface RouterModelView {
   id: string
   name: string
   active: string | null
+  enabled: boolean
   order: string[]
   providers: RouterProviderView[]
 }
@@ -63,6 +64,8 @@ async function call<T>(method: string, payload: Record<string, unknown> = {}): P
 
 export const api = {
   state: () => call<ModelRouterState>('state'),
+  setModelEnabled: (modelId: string, enabled: boolean) =>
+    call<ModelRouterState>('set-model-enabled', { modelId, enabled }),
   switchActive: (modelId: string, providerId: string) =>
     call<ModelRouterState>('switch-active', { modelId, providerId }),
   reorder: (modelId: string, order: string[]) =>

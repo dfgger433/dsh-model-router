@@ -62,6 +62,8 @@ export interface RouterModelConfig {
   order: string[]
   /** The provider requests currently route to. */
   active: string
+  /** Whether this model may be advertised and routed by model-router. */
+  enabled: boolean
 }
 
 /**
@@ -241,7 +243,7 @@ export function sortModelsForList(
 /** Initial config for a model the user never configured: first in order wins. */
 export function initialConfigFor(providerIds: readonly string[]): RouterModelConfig | null {
   if (providerIds.length === 0) return null
-  return { order: [...providerIds], active: providerIds[0] }
+  return { order: [...providerIds], active: providerIds[0], enabled: true }
 }
 
 /**
@@ -313,7 +315,10 @@ export function syncConfig(
     changed = true
   }
   if (changed) {
-    next[modelId] = { order, active }
+    next[modelId] = { order, active, enabled: existing.enabled !== false }
+  } else if (existing.enabled === undefined) {
+    next[modelId] = { order, active, enabled: true }
+    changed = true
   }
   return { models: next, changed }
 }
@@ -325,7 +330,7 @@ function sameModels(a: Record<string, RouterModelConfig>, b: Record<string, Rout
   for (const key of aKeys) {
     const x = a[key]
     const y = b[key]
-    if (y === undefined || x.active !== y.active || x.order.length !== y.order.length) return false
+    if (y === undefined || x.active !== y.active || x.enabled !== y.enabled || x.order.length !== y.order.length) return false
     if (!x.order.every((id, i) => id === y.order[i])) return false
   }
   return true
@@ -386,7 +391,11 @@ export function reconcileConfig(
           if (!order.includes(id)) order.push(id)
         }
       }
-      base = { order, active: exact?.entry.active ?? ordered[0].entry.active }
+      base = {
+        order,
+        active: exact?.entry.active ?? ordered[0].entry.active,
+        enabled: exact?.entry.enabled ?? ordered[0].entry.enabled !== false,
+      }
     }
     const view: RouterConfigShape = { ...config, models: { ...next } }
     if (base !== undefined) view.models[model.id] = base
@@ -437,7 +446,7 @@ export function setActive(
   const entry = next[modelId]
   if (entry === undefined) return { models: next, changed: synced.changed }
   if (entry.active === providerId) return { models: next, changed: synced.changed }
-  next[modelId] = { ...entry, active: providerId }
+  next[modelId] = { ...entry, active: providerId, enabled: entry.enabled !== false }
   return { models: next, changed: true }
 }
 
@@ -527,11 +536,11 @@ export function normalizeConfig(value: unknown): RouterConfigShape {
   }
   for (const [id, entry] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof entry !== 'object' || entry === null) continue
-    const e = entry as { order?: unknown; active?: unknown }
+    const e = entry as { order?: unknown; active?: unknown; enabled?: unknown }
     const order = Array.isArray(e.order) ? e.order.filter((x): x is string => typeof x === 'string') : []
     const active = typeof e.active === 'string' ? e.active : order[0] ?? ''
     if (active === '') continue
-    models[id] = { order, active }
+    models[id] = { order, active, enabled: e.enabled !== false }
   }
   return { models, showQuickSwitch, ignoreModelIdPrefix, modelSort, modelOrder, recentlyUsed }
 }

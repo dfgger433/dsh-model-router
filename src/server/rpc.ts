@@ -120,6 +120,13 @@ export function registerApiRoutes(ctx: Context, service: ModelRouterService): ()
     return service.state()
   })
 
+  route('set-model-enabled', async (p) => {
+    const modelId = requireString(p.modelId, 'modelId')
+    if (typeof p.enabled !== 'boolean') throw new Error('enabled 必须是布尔值')
+    await service.setModelEnabled(modelId, p.enabled)
+    return service.state()
+  })
+
   route('reorder', async (p) => {
     const modelId = requireString(p.modelId, 'modelId')
     if (!Array.isArray(p.order) || !p.order.every((id): id is string => typeof id === 'string')) {

@@ -15,6 +15,7 @@ import {
   resolveActive,
   setActive,
   setOrder,
+  syncConfig,
   sortModelsForList,
   type ModelSortMode,
   type RouterConfigShape,
@@ -58,6 +59,7 @@ export const RouterConfigSchema = z.object({
   models: z.dict(z.object({
     order: z.array(z.string()),
     active: z.string(),
+    enabled: z.boolean(),
   })).volatile(),
   // Older documents predate the toggles; normalizeConfig defaults both on.
   // Schemastery object keys are input-optional, so absent is valid here.
@@ -90,6 +92,8 @@ export interface ModelRouterState {
     name: string
     /** Effective active provider (never null while the model has providers). */
     active: string | null
+    /** Whether this model is enabled for routing. */
+    enabled: boolean
     /** Effective provider preference order. */
     order: string[]
     providers: Array<{ id: string; name: string; credentialConfigured: boolean }>
@@ -104,7 +108,11 @@ export class ModelRouterService implements RouterFacts {
     models: [],
     byId: new Map(),
     credentialConfigured: new Map(),
+    complete: false,
   }
+  /** Serialize read-modify-write operations, not precomputed snapshots. */
+  private writeQueue: Promise<void> = Promise.resolve()
+  private stopped = false
   private inflight: Promise<RouterCatalog> | null = null
   private cachedAt = 0
   /** Optional host settings service; absent in profiles without one (no persistence). */
@@ -133,6 +141,7 @@ export class ModelRouterService implements RouterFacts {
 
   /** Register the settings seam + adapter and wire topology listeners. */
   start(): void {
+    this.stopped = false
     // Optional settings service: without one the router still routes
     // (config falls back to catalog order) but cannot persist. The service's
     // shape is only used through SettingsReplaceFace; there is no namespace
@@ -155,6 +164,7 @@ export class ModelRouterService implements RouterFacts {
   }
 
   stop(): void {
+    this.stopped = true
     // Drop pending recent-use bookkeeping instead of flushing it: on dsh >=
     // 0.1.7 every persist is an entry-config write, which reloads this plugin
     // (teardown included), so writing from stop() would re-enter the loader
@@ -212,11 +222,10 @@ export class ModelRouterService implements RouterFacts {
     this.pendingUsage = {}
     try {
       if (this.settings === undefined || Object.keys(pending).length === 0) return
-      const current = this.config()
-      await this.writeConfig({
+      await this.writeConfig(current => ({
         ...current,
         recentlyUsed: { ...current.recentlyUsed, ...pending },
-      })
+      }))
     } catch (error) {
       // Re-queue the failed batch so a transient write failure does not lose
       // usage history; the next request retries it.
@@ -262,18 +271,26 @@ export class ModelRouterService implements RouterFacts {
     return this.inflight
   }
 
-  /** Refresh (forced), then persist any config drift (migration, new/vanished models). */
+  /** Refresh discovery without treating temporarily absent models as deleted preferences. */
   async refreshAndReconcile(): Promise<void> {
     const catalog = await this.refreshCatalog(true)
-    if (this.settings === undefined) return
-    const current = this.config()
-    const { models, modelOrder, changed } = reconcileConfig(current, catalog.models)
-    if (!changed) return
+    if (this.settings === undefined || this.stopped) return
     try {
-      await this.writeConfig({
-        ...current,
-        models,
-        ...(modelOrder === undefined ? {} : { modelOrder }),
+      await this.writeConfig(current => {
+        // A queued reconcile must not apply an obsolete or incomplete catalog.
+        if (catalog !== this.cached || !catalog.complete || catalog.models.length === 0) return null
+        const registered = new Set(catalog.providers.map(provider => provider.id))
+        if (Object.values(current.models).some(entry =>
+          [entry.active, ...entry.order].some(id => !registered.has(id)),
+        )) return null
+        const { models, modelOrder } = reconcileConfig(current, catalog.models)
+        // Even successful discovery can temporarily omit individual models.
+        // Persist additions/repairs, but retain missing models and custom order.
+        const order = [...current.modelOrder]
+        for (const id of modelOrder ?? []) {
+          if (!order.includes(id)) order.push(id)
+        }
+        return { ...current, models: { ...current.models, ...models }, modelOrder: order }
       })
     } catch (error) {
       this.ctx.logger.warn(`model-router: reconcile persist failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -315,6 +332,7 @@ export class ModelRouterService implements RouterFacts {
           id: model.id,
           name: activeEntry?.name ?? model.id,
           active,
+          enabled: stored?.enabled !== false,
           order: stored?.order ?? [...ids],
           providers: model.providers.map(provider => ({
             id: provider.provider,
@@ -333,9 +351,27 @@ export class ModelRouterService implements RouterFacts {
     if (ids === undefined || ids.length === 0) {
       throw new Error(`model-router: model "${modelId}" is not served by any provider`)
     }
-    const { models, changed } = setActive(this.config(), modelId, providerId, ids)
-    if (!changed) return
-    await this.persist(models)
+    await this.writeConfig(current => {
+      const { models, changed } = setActive(current, modelId, providerId, ids)
+      return changed ? { ...current, models } : null
+    })
+  }
+
+  /** Toggle whether one merged model may be advertised and routed. */
+  async setModelEnabled(modelId: string, enabled: boolean): Promise<void> {
+    await this.refreshCatalog()
+    const model = this.cached.byId.get(modelId)
+    if (model === undefined || model.providers.length === 0) {
+      throw new Error(`model-router: model "${modelId}" is not served by any provider`)
+    }
+    const ids = model.providers.map(provider => provider.provider)
+    await this.writeConfig(current => {
+      const synced = syncConfig(current, modelId, ids)
+      const entry = synced.models[modelId]
+      if (entry === undefined) throw new Error(`model-router: model "${modelId}" has no configuration`)
+      if (entry.enabled === enabled && !synced.changed) return null
+      return { ...current, models: { ...synced.models, [modelId]: { ...entry, enabled } } }
+    })
   }
 
   /** Replace the preference order for one model (active left untouched). */
@@ -345,16 +381,16 @@ export class ModelRouterService implements RouterFacts {
     if (ids === undefined || ids.length === 0) {
       throw new Error(`model-router: model "${modelId}" is not served by any provider`)
     }
-    const { models, changed } = setOrder(this.config(), modelId, order, ids)
-    if (!changed) return
-    await this.persist(models)
+    await this.writeConfig(current => {
+      const { models, changed } = setOrder(current, modelId, order, ids)
+      return changed ? { ...current, models } : null
+    })
   }
 
   /** Toggle the composer quick route-switcher button (global, persisted). */
   async setShowQuickSwitch(value: boolean): Promise<void> {
-    const current = this.config()
-    if (current.showQuickSwitch === value) return
-    await this.writeConfig({ ...current, showQuickSwitch: value })
+    await this.writeConfig(current => current.showQuickSwitch === value
+      ? null : { ...current, showQuickSwitch: value })
   }
 
   /**
@@ -364,17 +400,15 @@ export class ModelRouterService implements RouterFacts {
    * turning on; split models re-initialize when turning off).
    */
   async setIgnoreModelIdPrefix(value: boolean): Promise<void> {
-    const current = this.config()
-    if (current.ignoreModelIdPrefix === value) return
-    await this.writeConfig({ ...current, ignoreModelIdPrefix: value })
+    await this.writeConfig(current => current.ignoreModelIdPrefix === value
+      ? null : { ...current, ignoreModelIdPrefix: value })
     await this.refreshAndReconcile()
   }
 
   /** Switch the model-list display order mode (global, persisted). */
   async setModelSort(mode: ModelSortMode): Promise<void> {
-    const current = this.config()
-    if (current.modelSort === mode) return
-    await this.writeConfig({ ...current, modelSort: mode })
+    await this.writeConfig(current => current.modelSort === mode
+      ? null : { ...current, modelSort: mode })
   }
 
   /**
@@ -389,24 +423,26 @@ export class ModelRouterService implements RouterFacts {
     for (const model of this.cached.models) {
       if (!clean.includes(model.id)) clean.push(model.id)
     }
-    const current = this.config()
-    const sameOrder = clean.length === current.modelOrder.length
-      && clean.every((id, at) => id === current.modelOrder[at])
-    if (sameOrder) return
-    await this.writeConfig({ ...current, modelOrder: clean })
+    await this.writeConfig(current => ({ ...current, modelOrder: clean }))
   }
 
-  /** Write the document through the host settings service (entry config). */
-  private async writeConfig(next: RouterConfigShape): Promise<void> {
-    if (this.settings === undefined) {
-      throw new Error('model-router: settings service is not available in this profile')
-    }
-    await this.settings.replace(NS, next, undefined)
-    this.configDoc = normalizeConfig(next)
-  }
-
-  private async persist(models: Record<string, { order: string[]; active: string }>): Promise<void> {
-    const current = this.config()
-    await this.writeConfig({ ...current, models })
+  /** Compute and persist each mutation against the latest successfully written config. */
+  private writeConfig(update: (current: RouterConfigShape) => RouterConfigShape | null): Promise<void> {
+    const write = this.writeQueue.then(async () => {
+      if (this.stopped) throw new Error('model-router: service has stopped')
+      if (this.settings === undefined) {
+        throw new Error('model-router: settings service is not available in this profile')
+      }
+      const current = this.config()
+      const updated = update(current)
+      if (updated === null) return
+      const next = normalizeConfig(updated)
+      if (JSON.stringify(next) === JSON.stringify(current)) return
+      await this.settings.replace(NS, next)
+      this.configDoc = next
+    })
+    // One failed write must reject its caller without poisoning later actions.
+    this.writeQueue = write.catch(() => {})
+    return write
   }
 }

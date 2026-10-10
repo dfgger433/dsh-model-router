@@ -30,6 +30,18 @@ function arrayMove<T>(list: readonly T[], from: number, to: number): T[] {
   return next
 }
 
+// Use the same complete provider list for rendering and drag indices.
+function getOrderedProviders(model: RouterModelView) {
+  const byId = new Map(model.providers.map(provider => [provider.id, provider]))
+  const providers = model.order.flatMap(id => {
+    const provider = byId.get(id)
+    if (provider === undefined) return []
+    byId.delete(id)
+    return [provider]
+  })
+  return [...providers, ...byId.values()]
+}
+
 function useLocaleRevision(ctx: ClientContext): number {
   const subscribe = useCallback(
     (onChange: () => void) => {
@@ -91,6 +103,18 @@ export function makeSettingsSection(ctx: ClientContext): () => JSX.Element {
       void load()
     }, [load])
 
+    const toggleModel = useCallback(async (model: RouterModelView, enabled: boolean) => {
+      setBusyModel(model.id)
+      try {
+        setState(await api.setModelEnabled(model.id, enabled))
+        setError(null)
+      } catch (cause) {
+        setError(t('modelToggleFailed', { message: cause instanceof Error ? cause.message : String(cause) }))
+      } finally {
+        setBusyModel(null)
+      }
+    }, [t])
+
     const switchActive = useCallback(async (model: RouterModelView, providerId: string) => {
       if (model.active === providerId) return
       setBusyModel(model.id)
@@ -106,7 +130,7 @@ export function makeSettingsSection(ctx: ClientContext): () => JSX.Element {
 
     const reorder = useCallback(async (model: RouterModelView, from: number, to: number) => {
       if (from === to) return
-      const order = arrayMove(model.order, from, to)
+      const order = arrayMove(getOrderedProviders(model).map(provider => provider.id), from, to)
       setState(prev => prev === null ? prev : {
         ...prev,
         models: prev.models.map(m => (m.id === model.id ? { ...m, order } : m)),
@@ -283,8 +307,8 @@ export function makeSettingsSection(ctx: ClientContext): () => JSX.Element {
                             }
                           }}
                           onDragOver={(event) => {
+                            event.preventDefault()
                             if (modelDrag !== null && modelDrag.index !== index) {
-                              event.preventDefault()
                               event.dataTransfer.dropEffect = 'move'
                             }
                           }}
@@ -331,7 +355,8 @@ export function makeSettingsSection(ctx: ClientContext): () => JSX.Element {
                   readOnly={!writable}
                   busy={busyModel === model.id}
                   dragging={drag}
-                  onDragStart={index => setDrag({ modelId: model.id, index })}
+                  onToggle={enabled => void toggleModel(model, enabled)}
+                   onDragStart={index => setDrag({ modelId: model.id, index })}
                   onDragEnd={() => setDrag(null)}
                   onDrop={index => {
                     if (drag !== null && drag.modelId === model.id) {
@@ -359,21 +384,33 @@ interface ModelCardProps {
   onDragStart: (index: number) => void
   onDragEnd: () => void
   onDrop: (index: number) => void
+  onToggle: (enabled: boolean) => void
   onSwitch: (providerId: string) => void
 }
 
 function ModelCard(props: ModelCardProps): JSX.Element {
   const { model, t, readOnly, busy, dragging } = props
+  const providers = getOrderedProviders(model)
   return (
     <section className={`mr-card${busy ? ' mr-card-busy' : ''}`}>
       <header className="mr-card-header">
         <span className="mr-model-name">{model.name}</span>
         <span className="mr-model-id">{model.id}</span>
         <span className="mr-provider-count">{t('providerCount', { count: model.providers.length })}</span>
+        <label className="mr-model-toggle">
+          <input
+            type="checkbox"
+            checked={model.enabled}
+            disabled={readOnly || busy}
+            onChange={(event) => props.onToggle(event.target.checked)}
+            aria-label={t('modelEnabledAria', { model: model.name })}
+          />
+          <span>{model.enabled ? t('modelEnabled') : t('modelDisabled')}</span>
+        </label>
       </header>
       <p className="mr-drag-hint">{t('dragHint')}</p>
       <ul className="mr-providers">
-        {model.providers.map((provider, index) => {
+        {providers.map((provider, index) => {
           const active = provider.id === model.active
           const selectable = provider.credentialConfigured
           const dropTarget = dragging !== null && dragging.modelId === model.id && dragging.index !== index
@@ -386,7 +423,7 @@ function ModelCard(props: ModelCardProps): JSX.Element {
                 !selectable ? 'mr-provider-nocred' : '',
                 dropTarget ? 'mr-provider-drop' : '',
               ].filter(Boolean).join(' ')}
-              draggable={!busy && !readOnly && model.providers.length > 1}
+              draggable={!busy && !readOnly && providers.length > 1}
               title={selectable ? undefined : t('noCredential')}
               onDragStart={(event) => {
                 props.onDragStart(index)
@@ -398,14 +435,14 @@ function ModelCard(props: ModelCardProps): JSX.Element {
                 }
               }}
               onDragOver={(event) => {
-                if (dragging !== null && dragging.modelId === model.id && dragging.index !== index) {
+                if (dragging !== null && dragging.modelId === model.id && dragging.index !== index && !busy && !readOnly && providers.length > 1) {
                   event.preventDefault()
                   event.dataTransfer.dropEffect = 'move'
                 }
               }}
               onDrop={(event) => {
+                event.preventDefault()
                 if (dragging !== null && dragging.modelId === model.id) {
-                  event.preventDefault()
                   props.onDrop(index)
                 }
               }}

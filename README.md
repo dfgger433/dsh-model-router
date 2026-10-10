@@ -1,75 +1,90 @@
-# dsh-model-router
+# dsh-model-router（v2 维护版）
 
-**dsh-model-router** 是一个 [DSH](https://github.com/deepseek-ai/dsh) 插件，向 harness 注册一个虚拟模型提供商 `model-router`：它汇聚用户已添加的**所有**提供商及其模型（按 model id 严格归并），并在每次 LLM 请求发出时把请求实时路由到该模型**当前激活**的提供商。配套的设置卡片（设置 → 插件 → 插件配置 → 模型路由）支持按模型对提供商拖拽排序（供后续自动切换使用）与点击切换当前提供商；切换后全局立即生效——下一次发出的该模型请求即走新提供商。
+**dsh-model-router** 是一个 [DSH](https://github.com/deepseek-ai/dsh) 插件。它注册虚拟提供商 `model-router`，把已配置的 provider/model 聚合为一个模型目录；每个聚合模型都维护自己的 active provider 与 provider 优先级顺序，实际请求在运行时路由到当前 active provider。
+
+本仓库的 `v2` 分支是用户 fork `dfgger433/dsh-model-router` 的维护版本。它不向上游 `fonlan/dsh-model-router` 自动合并，也不对主分支（`main`/`master`）进行发布；发布目标仅为用户 fork 的 `v2`。
 
 ## 功能
 
-- **虚拟提供商 `model-router`**：出现在输入框下方的模型选择器（含默认模型设置等所有选择入口）中，列出全部已配置提供商的所有模型，模型条目副文本标注当前激活的提供商（如 `via OpenCode Go`）。
-- **快速路由切换（并入模型选择菜单）**：当当前会话选择的是 `model-router` 模型时，点击输入栏的模型选择器会打开包含「模型 / 提供商 / 推理等级」三栏的菜单——提供商一栏列出该模型当前激活的提供商，可直接切换激活 provider。切换对所有会话的后续请求生效，完整排序和全量管理仍在设置 → 插件 → 插件配置 → 模型路由中完成。可在设置 → 插件 → 插件配置 → 模型路由中通过「在模型选择菜单中显示提供商切换」开关控制该入口是否显示。当 router 全局只有一个提供商、或当前模型仅由一个提供商服务时，提供商栏自动隐藏（无可切换对象）。
-- **严格按 model id 归并**：同一模型出现在多个提供商时归并为一条；展示名、上下文窗口、推理档位等参数跟随当前激活的提供商。
-- **忽略模型 ID 前缀**（默认开启）：`deepseek/deepseek-v4-flash` 与 `deepseek-v4-flash` 视为同一模型，统一显示不带前缀的模型 id；请求时传入带前缀的 id 也能命中同一路由。每个提供商条目保留自己的原始 id，委派时按原始 id 发给真实提供商。可在设置 → 插件 → 插件配置 → 模型路由中通过「匹配时忽略模型 ID 前缀」开关控制。
-- **请求时实时路由**：会话中始终保存 `provider=model-router`，每次请求发出时进程内解析当前激活提供商并委派给真实 adapter（凭据解析、重试、流式、计量全部走原管线），主 agent、子代理、工具 LLM 调用一视同仁。
-- **设置卡片**（设置 → 插件 → 插件配置 → 模型路由，可展开式卡片）：每个模型下列出其全部提供商——点击切换当前使用；拖拽调整优先级顺序（供后续自动切换策略使用）；未配置 API 密钥的提供商标灰不可选。
-- **模型显示顺序可配置**：设置卡片中可切换 model-router 分组在模型选择列表中的排列方式——自定义（手动拖拽模型顺序）、按名称（数字感知）、最近使用（最近请求过的模型排最前，未用过的排最后）。切换与拖拽全局即时生效。
-- **自动配置维护**：新增/删除提供商或模型后配置自动同步（消失的提供商从排序中清理、激活自动回落到剩余第一位、新提供商追加到排序末尾、消失的模型从自定义顺序中清理、新模型追加到自定义顺序末尾）；未配置过的模型自动选择排序第一位。
-- **失败即报错**：当前提供商请求失败直接返回错误（自动切换为后续规划功能）。
-- **双语**：设置卡片文案中英双语，跟随界面语言。
-- **通用运行时**：核心路由逻辑与 UI 解耦——web profile 提供设置卡片与模型选择菜单内的提供商切换；CLI / headless profile 装上同样按配置路由（可直接手改 `settings.yaml` 的 `model-router:` 段）。
+- **Model Router 聚合目录**：注册 `model-router` 虚拟 provider，按 model id 合并所有已注册 provider 的模型。同一模型可有多个来源；展示名、上下文窗口和推理档位跟随当前 active provider，模型描述会标注 `via <provider>`。
+- **每模型 active provider 与顺序**：每个模型保存独立的 `active` provider 和 `order`。切换 active 会立即影响后续请求；拖拽 `order` 会持久化 provider 优先级，并按该顺序显示。`order` 当前是偏好顺序，不会在请求失败时自动切换 provider。
+- **模型级 enabled 开关**：每张模型卡片都有启用开关。`enabled: false` 的模型会从 router 对外模型目录隐藏，并在 `resolveModel`、`prepareCall` 和 `stream` 绑定路由之前拒绝请求。旧配置没有 `enabled` 字段时按 `enabled: true` 兼容处理。
+- **设置页模型卡片**：设置 → 插件 → 插件配置 → 模型路由显示每个聚合模型及其 provider，支持切换 active、拖拽 provider 顺序、刷新目录和逐模型启用/停用。没有已配置凭据的 provider 会显示为不可选。
+- **provider 优先级拖拽**：每个模型卡片的 provider 列表按照 `model.order` 渲染和保存；服务端会清理不存在的 provider，并把新发现的 provider 追加到末尾，active provider 单独维护。
+- **模型列表排序**：设置页可选择自定义（拖拽 `modelOrder`）、按名称或最近使用排序。最近使用时间由路由请求异步、延迟写入，属于显示排序信息。
+- **可配置 provider 注册与设置持久化**：服务端通过 model-router configurable provider 注册 router adapter，并通过 `model-router` 设置命名空间持久化 active、order、enabled、模型列表排序和相关开关。RPC 只接受受信任的同源/loopback 请求。
+- **请求时实时委派**：`model-router` 保持在会话的 provider 字段中；请求发出时解析 active provider，并用 provider 的原始 model id 委派回真实 adapter，因此凭据、重试、流式和计量仍走 DSH 原有管线。
+- **可选的模型选择器快捷入口**：当前选中 `model-router` 模型且存在多个可用 provider 时，模型选择菜单可显示 provider 切换项；可在设置中关闭。模型 ID 前缀忽略、模型显示排序等开关同样持久化。
 
-## 配置
+## 配置示例
 
-路由配置持久化在 settings 文档的 `model-router` 命名空间（`~/.dsh/settings.yaml`）：
+配置保存在 DSH profile 的 `model-router` 设置命名空间（通常由设置服务管理；不要把个人 profile 配置文件提交到本仓库）：
 
 ```yaml
 model-router:
-  showQuickSwitch: true   # 是否在模型选择菜单中显示提供商切换入口（默认 true）
-  ignoreModelIdPrefix: true  # 匹配时忽略模型 ID 前缀（默认 true）
-  modelSort: custom       # 模型显示顺序：custom | name | recent（默认 custom）
-  modelOrder:             # custom 模式下的模型显示顺序（自动维护，无需手写）
+  showQuickSwitch: true
+  ignoreModelIdPrefix: true
+  modelSort: custom # custom | name | recent
+  modelOrder:
     - deepseek-v4-flash
-    - qwen3.7-max
-  recentlyUsed:           # recent 模式使用：模型 id → 最后使用时间戳（自动维护）
-    deepseek-v4-flash: 1787036509332
   models:
     deepseek-v4-flash:
-      order:            # 优先级顺序（供后续自动切换使用）
+      enabled: true
+      order:
         - opencode-go
         - deepseek-official
-      active: opencode-go   # 当前实际使用的提供商
+      active: opencode-go
 ```
 
-`order` 与 `active` 分开维护：点击切换只改 `active`，拖拽排序只改 `order`。`modelOrder` 与 `recentlyUsed` 由插件自动维护（`modelSort: recent` 时每次模型请求都会更新对应时间戳，防抖写入）。
+`active` 决定当前请求实际使用的 provider，`order` 只保存和展示 provider 偏好顺序。新增/移除 provider 或模型时，配置会在成功的目录刷新后同步；配置缺失的旧模型默认启用。
+
+## 已知行为与兼容性
+
+- 当前 provider 请求失败会直接返回错误；本版本不会按 `order` 自动故障转移。
+- 没有 host settings service 的 CLI/headless 环境仍可按已加载配置路由，但设置页变为只读或配置写入不可用；持久化能力取决于宿主环境。
+- 模型目录来自宿主 LLM adapter 注册表。provider 在启动阶段尚未完成模型枚举时，目录可能暂时不完整，刷新或拓扑事件后会再次同步。
+- 开启“忽略模型 ID 前缀”时，`vendor/model` 与 `model` 可以归并展示，但委派仍使用真实 provider 所需的原始 ID；关闭该选项后模型会按完整 ID 分开。
+- 已有仅含 `order`/`active` 的旧配置可继续使用，规范化时会补上 `enabled: true`。配置写入由设置服务串行化，设置页和 RPC 使用同一份持久化状态。
+- 本版本依赖 DSH 的 Cordis/LLM/settings/web 注入面及 React 客户端注入面；请使用与 `package.json` peer dependencies 兼容的 DSH 版本。服务端代码更新后需要重启 profile，客户端更新需重新构建 web bundle（开发时可配合宿主的 HMR 链路）。
 
 ## 安装
 
-### 方式一：从 npm 发布包安装
+### 从用户 fork 的 v2 预构建发布内容（推荐）
 
 ```sh
-dsh plugin --profile web add @fonlan/dsh-model-router
-```
-
-### 方式二：本地源码链接安装
-
-在仓库目录下构建出 `lib/` 产物后以本地目录方式添加：
-
-```sh
-pnpm build
+git clone --branch v2 https://github.com/dfgger433/dsh-model-router.git
+cd dsh-model-router
 dsh plugin --profile web add .
 ```
 
-安装后插件通过 `cordis.patch.yml` 自动挂载到目标 profile：服务端注册 `model-router` 提供商与路由配置，web 端注册 `settings.plugin.item` 设置卡片（键 = `model-router` 设置命名空间，即设置 → 插件 → 插件配置 → 模型路由）。重启 profile 后生效（web profile 重启后，输入框下方的模型选择器即出现 Model Router 分组）。
+本分支提交已经包含与 `src/` 对应的预构建 `lib/`，安装时不需要把个人 profile 配置复制进仓库，也不需要提交 `node_modules/`。安装后 `cordis.patch.yml` 会把插件挂载到目标 profile；重启 profile 后，模型选择器中会出现 Model Router 分组，设置页会出现模型路由卡片。
 
-## 开发
+### 本地目录安装
+
+如果已经取得本仓库目录（其中必须存在 `lib/index.js` 与 `lib/client.js`），可直接安装：
 
 ```sh
-pnpm install     # 安装依赖
-pnpm build       # 构建 lib/（tsc 声明 + tsdown 双端产物）
-pnpm test        # vitest 单测（归并/路由解析/委派等纯逻辑）
-pnpm typecheck   # server + client 双 tsconfig 类型检查
+dsh plugin --profile web add .
 ```
 
-- 修改服务端后需重启 profile。
-- 客户端改动走 web 端 HMR 链路，`pnpm run dev:web` 同启时生效。
+发布包刻意只保留运行所需的 `src/`、预构建 `lib/`、`package.json`、`cordis.patch.yml`、`README.md` 与 `LICENSE`。不要复制或提交 `node_modules/`、`.dsh/` profile 配置、临时缓存、备份或运行日志。
+
+## 开发与验证
+
+此 v2 发布树面向安装，提交的是已构建的 `lib/`；它不携带开发 checkout 的 TypeScript/vitest 构建配置和测试目录。修改 `src/` 后，应在包含宿主依赖与构建配置的开发 checkout 中重新生成 `lib/`，再运行等价验证并更新发布树。
+
+本发布树可做基础语法与元数据验证：
+
+```sh
+node --check lib/index.js
+node --check lib/client.js
+node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))"
+git diff --check
+```
+
+- 服务端修改后需重启 profile。
+- 客户端修改后需重新构建宿主 web bundle；若宿主已运行对应 HMR watcher，可使用其开发链路。
+- 仅允许将维护提交推送到用户 fork 的 `v2`；本分支不会自动合并上游或推送 `main`/`master`。
 
 ## License
 
